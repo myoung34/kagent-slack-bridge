@@ -1,5 +1,7 @@
 """Slack <-> kagent bridge: @mention (or DM) the bot, it asks one A2A agent.
 
+Once the bot has replied in a thread, later replies there need no mention.
+
 Each Slack thread maps to one kagent conversation through a context id
 derived from the thread, so threads keep their context across restarts
 without any stored state.
@@ -12,8 +14,9 @@ import re
 import urllib.request
 import uuid
 from dataclasses import dataclass
+from enum import Enum, auto
 
-from slack_bolt import App
+from slack_bolt import App, BoltContext
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk import WebClient
 
@@ -33,6 +36,30 @@ class AgentError(Exception):
 class Reply:
     text: str
     needs_input: bool
+
+
+class Route(Enum):
+    HANDLE = auto()
+    IF_BOT_IN_THREAD = auto()
+    IGNORE = auto()
+
+
+def route_message(event: dict[str, str], bot_user_id: str) -> Route:
+    """Decide what to do with a `message` event (mentions arrive separately)."""
+    if "subtype" in event or "bot_id" in event:
+        return Route.IGNORE
+    if event.get("channel_type") == "im":
+        return Route.HANDLE
+    thread_ts = event.get("thread_ts")
+    if not thread_ts or thread_ts == event.get("ts"):
+        return Route.IGNORE
+    if f"<@{bot_user_id}>" in event.get("text", ""):
+        return Route.IGNORE
+    return Route.IF_BOT_IN_THREAD
+
+
+def bot_in_thread(messages: list[dict[str, str]], bot_user_id: str) -> bool:
+    return any(m.get("user") == bot_user_id for m in messages)
 
 
 def context_id(channel: str, thread_ts: str) -> str:
@@ -141,13 +168,20 @@ def main() -> None:
         handle(event, client)
 
     @app.event("message")
-    def on_message(event: dict[str, str], client: WebClient) -> None:
-        # DMs only; skip edits, joins and the bot's own posts (subtype/bot_id).
-        if event.get("channel_type") != "im" or "subtype" in event:
-            return
-        if "bot_id" in event:
-            return
-        handle(event, client)
+    def on_message(
+        event: dict[str, str], client: WebClient, context: BoltContext
+    ) -> None:
+        bot_user_id = context.bot_user_id or ""
+        route = route_message(event, bot_user_id)
+        if route is Route.IF_BOT_IN_THREAD:
+            replies = client.conversations_replies(
+                channel=event["channel"], ts=event["thread_ts"]
+            )
+            if not bot_in_thread(replies.get("messages", []), bot_user_id):
+                return
+            route = Route.HANDLE
+        if route is Route.HANDLE:
+            handle(event, client)
 
     SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"]).start()
 

@@ -2,7 +2,8 @@
 
 Slack bridge for [kagent](https://kagent.dev) agents over A2A. @mention the
 bot in a channel, or DM it, and it sends the message to one kagent agent and
-replies in the thread.
+replies in the thread. Once it has replied in a thread, later replies in that
+thread reach it without a mention.
 
 - **One session per thread.** The A2A `contextId` is derived from the Slack
   channel and thread (`uuid5`), so a thread keeps its conversation across

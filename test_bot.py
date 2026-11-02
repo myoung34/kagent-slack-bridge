@@ -110,3 +110,60 @@ def test_build_request_carries_text_and_context() -> None:
 def test_parse_response_without_result_raises() -> None:
     with pytest.raises(bot.AgentError, match="no result"):
         bot.parse_result({"jsonrpc": "2.0", "id": "1"})
+
+
+BOT = "UBOT"
+
+
+@pytest.mark.parametrize(
+    ("event", "expected"),
+    [
+        # DMs are always answered.
+        ({"channel_type": "im", "ts": "1"}, bot.Route.HANDLE),
+        # Thread replies in channels need the bot to be in the thread.
+        (
+            {"channel_type": "channel", "ts": "2", "thread_ts": "1", "text": "hi"},
+            bot.Route.IF_BOT_IN_THREAD,
+        ),
+        (
+            {"channel_type": "group", "ts": "2", "thread_ts": "1", "text": "hi"},
+            bot.Route.IF_BOT_IN_THREAD,
+        ),
+        # Top-level channel messages: only via app_mention.
+        ({"channel_type": "channel", "ts": "1", "text": "hi"}, bot.Route.IGNORE),
+        (
+            {"channel_type": "channel", "ts": "1", "thread_ts": "1", "text": "hi"},
+            bot.Route.IGNORE,
+        ),
+        # A mention in a thread also arrives as app_mention; answer once.
+        (
+            {
+                "channel_type": "channel",
+                "ts": "2",
+                "thread_ts": "1",
+                "text": f"<@{BOT}> hi",
+            },
+            bot.Route.IGNORE,
+        ),
+        # Edits, joins and bot posts (including our own).
+        (
+            {"channel_type": "im", "ts": "1", "subtype": "message_changed"},
+            bot.Route.IGNORE,
+        ),
+        ({"channel_type": "im", "ts": "1", "bot_id": "B1"}, bot.Route.IGNORE),
+    ],
+)
+def test_route_message(event: dict[str, str], expected: bot.Route) -> None:
+    assert bot.route_message(event, BOT) is expected
+
+
+@pytest.mark.parametrize(
+    ("messages", "expected"),
+    [
+        ([{"user": "U1"}, {"user": BOT, "bot_id": "B1"}], True),
+        ([{"user": "U1"}, {"user": "U2"}], False),
+        ([], False),
+    ],
+)
+def test_bot_in_thread(messages: list[dict[str, str]], expected: bool) -> None:
+    assert bot.bot_in_thread(messages, BOT) is expected
