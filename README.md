@@ -12,8 +12,12 @@ thread reach it without a mention.
 - **No timeout.** It waits as long as the agent runs, with a :eyes: reaction
   while it works.
 - **Allowlist.** Only users in `ALLOWED_USER_IDS` get an answer.
-- **Questions from the agent** (`input-required`, e.g. kagent's `ask_user`)
-  are answered in the kagent UI; the bot posts a link to the session.
+- **Questions from the agent** are relayed. When the agent (or a subagent it
+  calls) pauses on kagent's `ask_user`, the bot posts the questions and your
+  next thread reply answers them, one line per question. A tool awaiting
+  approval takes `approve`, or `reject` with an optional reason. The bot keeps
+  no state: the paused task id rides on its Slack post as message metadata.
+  Any other `input-required` pause links to the kagent UI session instead.
 
 ## Configuration
 

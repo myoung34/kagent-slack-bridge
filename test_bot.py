@@ -46,7 +46,9 @@ def test_parse_input_required_flags_it() -> None:
             }
         }
     }
-    assert bot.parse_result(resp) == bot.Reply(text="which node?", needs_input=True)
+    assert bot.parse_result(resp) == bot.Reply(
+        text="which node?", needs_input=True, pending=None
+    )
 
 
 def test_parse_failed_task_raises_with_its_message() -> None:
@@ -167,3 +169,178 @@ def test_route_message(event: dict[str, str], expected: bot.Route) -> None:
 )
 def test_bot_in_thread(messages: list[dict[str, str]], expected: bool) -> None:
     assert bot.bot_in_thread(messages, BOT) is expected
+
+
+def _confirmation(args: dict[str, object]) -> dict[str, object]:
+    """An input-required task paused on kagent's adk_request_confirmation."""
+    return {
+        "result": {
+            "kind": "task",
+            "id": "task-1",
+            "status": {
+                "state": "input-required",
+                "message": {
+                    "parts": [
+                        {
+                            "kind": "data",
+                            "data": {"name": "adk_request_confirmation", "args": args},
+                        }
+                    ]
+                },
+            },
+        }
+    }
+
+
+def _ask_user(*questions: dict[str, object]) -> dict[str, object]:
+    return {"name": "ask_user", "args": {"questions": list(questions)}, "id": "c1"}
+
+
+def test_parse_ask_user_shows_questions_and_choices() -> None:
+    resp = _confirmation(
+        {
+            "originalFunctionCall": _ask_user(
+                {"question": "Which node?", "choices": ["a", "b"]},
+                {"question": "Why?"},
+            ),
+            "toolConfirmation": {"hint": "Which node?; Why?"},
+        }
+    )
+    reply = bot.parse_result(resp)
+    assert reply.pending == bot.Pending(task_id="task-1", questions=2)
+    assert "Which node?" in reply.text
+    assert "a, b" in reply.text
+    assert "Why?" in reply.text
+
+
+def test_parse_subagent_ask_user_unwraps_hitl_parts() -> None:
+    # Shape seen from router-agent -> homelab-agent -> ask_user.
+    resp = _confirmation(
+        {
+            "originalFunctionCall": {
+                "name": "kagent__NS__homelab_agent",
+                "args": {"request": "front door"},
+                "id": "outer",
+            },
+            "toolConfirmation": {
+                "hint": "Remote agent requires approval for tool(s): ask_user",
+                "payload": {
+                    "hitl_parts": [
+                        {
+                            "name": "adk_request_confirmation",
+                            "originalFunctionCall": _ask_user(
+                                {"question": "Need a HA token."}
+                            ),
+                        }
+                    ],
+                    "task_id": "sub-task",
+                },
+            },
+        }
+    )
+    reply = bot.parse_result(resp)
+    assert reply.pending == bot.Pending(task_id="task-1", questions=1)
+    assert "Need a HA token." in reply.text
+    assert "homelab_agent" not in reply.text
+
+
+def test_parse_tool_approval_names_the_tool() -> None:
+    resp = _confirmation(
+        {
+            "originalFunctionCall": {
+                "name": "delete_pod",
+                "args": {"name": "jellyfin-0"},
+                "id": "c1",
+            },
+            "toolConfirmation": {"hint": "delete_pod requires approval"},
+        }
+    )
+    reply = bot.parse_result(resp)
+    assert reply.pending == bot.Pending(task_id="task-1", questions=0)
+    assert "delete_pod" in reply.text
+    assert "jellyfin-0" in reply.text
+
+
+def test_render_pending_asks_for_a_thread_reply_not_the_ui() -> None:
+    reply = bot.Reply(text="Which node?", needs_input=True, pending=bot.Pending("t", 1))
+    out = bot.render(reply, "https://kagent.example/chat", "abc")
+    assert "kagent.example" not in out[-1]
+    assert "Reply in this thread" in out[-1]
+
+
+def _bot_msg(pending: bot.Pending | None) -> dict[str, object]:
+    msg: dict[str, object] = {"user": BOT, "bot_id": "B1", "text": "q"}
+    if pending:
+        msg["metadata"] = bot.pending_metadata(pending)
+    return msg
+
+
+@pytest.mark.parametrize(
+    ("messages", "expected"),
+    [
+        # The prompt is the bot's latest message; the user's answer follows it.
+        (
+            [{"user": "U1"}, _bot_msg(bot.Pending("t", 2)), {"user": "U1"}],
+            bot.Pending("t", 2),
+        ),
+        # The bot replied again since, so the prompt was answered.
+        ([_bot_msg(bot.Pending("t", 2)), {"user": "U1"}, _bot_msg(None)], None),
+        ([{"user": "U1"}, _bot_msg(None)], None),
+        ([{"user": "U1"}], None),
+    ],
+)
+def test_pending_prompt(
+    messages: list[dict[str, object]], expected: bot.Pending | None
+) -> None:
+    assert bot.pending_prompt(messages, BOT) == expected
+
+
+def _decision(req: dict[str, object]) -> tuple[dict[str, object], str]:
+    msg = req["params"]["message"]  # type: ignore[index]
+    data = next(p["data"] for p in msg["parts"] if p["kind"] == "data")
+    return data, msg["taskId"]
+
+
+def test_answer_single_question_keeps_the_whole_reply() -> None:
+    req = bot.build_answer("line one\nline two", "ctx-1", bot.Pending("t", 1))
+    data, task_id = _decision(req)
+    assert task_id == "t"
+    assert req["params"]["message"]["contextId"] == "ctx-1"  # type: ignore[index]
+    assert data == {
+        "decision_type": "approve",
+        "ask_user_answers": [{"answer": ["line one\nline two"]}],
+    }
+
+
+def test_answer_several_questions_one_per_line() -> None:
+    req = bot.build_answer("a\n\n b ", "c", bot.Pending("t", 2))
+    data, _ = _decision(req)
+    assert data["ask_user_answers"] == [{"answer": ["a"]}, {"answer": ["b"]}]
+
+
+def test_answer_line_count_must_match_questions() -> None:
+    with pytest.raises(bot.AnswerError, match="2 questions"):
+        bot.build_answer("only one", "c", bot.Pending("t", 2))
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("approve", {"decision_type": "approve"}),
+        ("Yes", {"decision_type": "approve"}),
+        ("reject", {"decision_type": "reject"}),
+        (
+            "no, too risky",
+            {"decision_type": "reject", "rejection_reason": "too risky"},
+        ),
+    ],
+)
+def test_answer_approval(text: str, expected: dict[str, str]) -> None:
+    data, task_id = _decision(bot.build_answer(text, "c", bot.Pending("t", 0)))
+    assert task_id == "t"
+    assert data == expected
+
+
+def test_answer_approval_needs_a_clear_decision() -> None:
+    with pytest.raises(bot.AnswerError, match="approve"):
+        bot.build_answer("maybe later", "c", bot.Pending("t", 0))
