@@ -89,7 +89,8 @@ def context_id(channel: str, thread_ts: str) -> str:
 
 
 def strip_mention(text: str) -> str:
-    return " ".join(_MENTION.sub(" ", text).split())
+    lines = (" ".join(line.split()) for line in _MENTION.sub(" ", text).splitlines())
+    return "\n".join(line for line in lines if line)
 
 
 def is_allowed(user: str, allowed: frozenset[str]) -> bool:
