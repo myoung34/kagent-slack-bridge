@@ -18,6 +18,7 @@ def test_different_thread_gets_different_context(channel: str, thread_ts: str) -
         ("<@U123> restart jellyfin", "restart jellyfin"),
         ("hey <@U123>  what's up ", "hey what's up"),
         ("no mention", "no mention"),
+        ("<@U123> 1 nfs\n2  yes\n3 photos", "1 nfs\n2 yes\n3 photos"),
     ],
 )
 def test_strip_mention(text: str, expected: str) -> None:
