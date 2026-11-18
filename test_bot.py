@@ -358,9 +358,15 @@ def test_answer_several_questions_one_per_line() -> None:
     assert data["ask_user_answers"] == [{"answer": ["a"]}, {"answer": ["b"]}]
 
 
+def test_answer_one_line_answers_every_question() -> None:
+    req = bot.build_answer("proceed", "c", bot.Pending("t", 3))
+    data, _ = _decision(req)
+    assert data["ask_user_answers"] == [{"answer": ["proceed"]}] * 3
+
+
 def test_answer_line_count_must_match_questions() -> None:
-    with pytest.raises(bot.AnswerError, match="2 questions"):
-        bot.build_answer("only one", "c", bot.Pending("t", 2))
+    with pytest.raises(bot.AnswerError, match=r"3 questions.*got 2"):
+        bot.build_answer("a\nb", "c", bot.Pending("t", 3))
 
 
 @pytest.mark.parametrize(

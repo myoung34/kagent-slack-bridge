@@ -147,9 +147,12 @@ def _decision(text: str, pending: Pending) -> dict[str, object]:
         return {"decision_type": "approve", "ask_user_answers": [{"answer": [text]}]}
     if pending.questions > 1:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if len(lines) == 1:
+            lines *= pending.questions
         if len(lines) != pending.questions:
             raise AnswerError(
-                f"Answer the {pending.questions} questions one per line, in order."
+                f"Answer the {pending.questions} questions one per line, in order"
+                f" (got {len(lines)}), or one line to answer them all."
             )
         answers = [{"answer": [line]} for line in lines]
         return {"decision_type": "approve", "ask_user_answers": answers}
