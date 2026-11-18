@@ -2,14 +2,53 @@ import pytest
 
 import bot
 
+AGENTS = ("homelab-agent", "printer-agent", "general-agent")
+
 
 def test_same_thread_gets_same_context() -> None:
-    assert bot.context_id("C1", "111.1") == bot.context_id("C1", "111.1")
+    assert bot.context_id("a", "C1", "111.1") == bot.context_id("a", "C1", "111.1")
 
 
-@pytest.mark.parametrize(("channel", "thread_ts"), [("C2", "111.1"), ("C1", "222.2")])
-def test_different_thread_gets_different_context(channel: str, thread_ts: str) -> None:
-    assert bot.context_id(channel, thread_ts) != bot.context_id("C1", "111.1")
+@pytest.mark.parametrize(
+    ("agent", "channel", "thread_ts"),
+    [("a", "C2", "111.1"), ("a", "C1", "222.2"), ("b", "C1", "111.1")],
+)
+def test_different_thread_or_agent_gets_different_context(
+    agent: str, channel: str, thread_ts: str
+) -> None:
+    assert bot.context_id(agent, channel, thread_ts) != bot.context_id(
+        "a", "C1", "111.1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "agent", "rest"),
+    [
+        ("printer: is enderbig printing?", "printer-agent", "is enderbig printing?"),
+        ("General:weather tomorrow", "general-agent", "weather tomorrow"),
+        ("homelab: why is jellyfin down", "homelab-agent", "why is jellyfin down"),
+        ("why is jellyfin down", "homelab-agent", "why is jellyfin down"),
+        ("note: not an agent", "homelab-agent", "note: not an agent"),
+        ("see https://example.com", "homelab-agent", "see https://example.com"),
+        ("printer: line one\nline two", "printer-agent", "line one\nline two"),
+    ],
+)
+def test_pick_agent(text: str, agent: str, rest: str) -> None:
+    assert bot.pick_agent(text, AGENTS) == (agent, rest)
+
+
+@pytest.mark.parametrize(
+    ("messages", "expected"),
+    [
+        ([{"text": "<@U1> printer: status?"}, {"text": "and now?"}], "printer-agent"),
+        ([{"text": "restart jellyfin"}, {"text": "printer: hi"}], "homelab-agent"),
+        ([], "homelab-agent"),
+    ],
+)
+def test_thread_agent_follows_the_root_message(
+    messages: list[dict[str, str]], expected: str
+) -> None:
+    assert bot.thread_agent(messages, AGENTS) == expected
 
 
 @pytest.mark.parametrize(
