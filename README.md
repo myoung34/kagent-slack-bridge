@@ -1,12 +1,17 @@
 # kagent-slack-bridge
 
 Slack bridge for [kagent](https://kagent.dev) agents over A2A. @mention the
-bot in a channel, or DM it, and it sends the message to one kagent agent and
+bot in a channel, or DM it, and it sends the message to a kagent agent and
 replies in the thread. Once it has replied in a thread, later replies in that
 thread reach it without a mention.
 
-- **One session per thread.** The A2A `contextId` is derived from the Slack
-  channel and thread (`uuid5`), so a thread keeps its conversation across
+- **Pick the agent with a prefix.** Start a message with `<name>:` to send it
+  to `<name>-agent` (`printer: is enderbig printing?`); without one, the first
+  agent in `KAGENT_AGENTS` answers. A thread stays with the agent its first
+  message picked, so replies need no prefix. The pick is plain string
+  matching, with no model in the way.
+- **One session per thread.** The A2A `contextId` is derived from the agent,
+  Slack channel and thread (`uuid5`), so a thread keeps its conversation across
   restarts with no stored state. It is also the kagent session id, so the
   thread shows in the kagent UI.
 - **No timeout.** It waits as long as the agent runs, with a :eyes: reaction
@@ -23,8 +28,9 @@ thread reach it without a mention.
 
 | Variable | Value |
 | --- | --- |
-| `KAGENT_A2A_URL` | Agent's A2A endpoint, e.g. `http://kagent-controller.kagent:8083/api/a2a/kagent/router-agent/` |
-| `KAGENT_UI_CHAT_URL` | UI chat base, e.g. `https://kagent.example/agents/kagent/router-agent/chat` |
+| `KAGENT_AGENTS` | Comma- or space-separated agent names; the first is the default, e.g. `homelab-agent printer-agent general-agent` |
+| `KAGENT_A2A_URL` | A2A endpoint with an `{agent}` placeholder, e.g. `http://kagent-controller.kagent:8083/api/a2a/kagent/{agent}/` |
+| `KAGENT_UI_CHAT_URL` | UI chat base with an `{agent}` placeholder, e.g. `https://kagent.example/agents/kagent/{agent}/chat` |
 | `ALLOWED_USER_IDS` | Comma- or space-separated Slack member IDs |
 | `SLACK_BOT_TOKEN` | Bot User OAuth Token (`xoxb-`) |
 | `SLACK_APP_TOKEN` | App-level token with `connections:write` (`xapp-`) |

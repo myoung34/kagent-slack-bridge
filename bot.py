@@ -1,4 +1,7 @@
-"""Slack <-> kagent bridge: @mention (or DM) the bot, it asks one A2A agent.
+"""Slack <-> kagent bridge: @mention (or DM) the bot, it asks a kagent agent.
+
+A leading `<name>:` picks the agent `<name>-agent`; otherwise the first in
+KAGENT_AGENTS answers. A thread stays with the agent its first message picked.
 
 Once the bot has replied in a thread, later replies there need no mention.
 When the agent pauses on kagent's ask_user or a tool approval, the bot posts
@@ -35,6 +38,7 @@ _PENDING_EVENT = "kagent_pending"
 _APPROVE = {"approve", "approved", "yes", "y", "ok"}
 _REJECT = {"reject", "rejected", "deny", "no", "n"}
 _DECISION = re.compile(r"\s*(\w+)[\s,.:;!-]*(.*)", re.DOTALL)
+_PREFIX = re.compile(r"\s*([\w-]+):(?!//)\s*(.*)", re.DOTALL)
 
 
 class AgentError(Exception):
@@ -84,8 +88,26 @@ def bot_in_thread(messages: list[dict[str, str]], bot_user_id: str) -> bool:
     return any(m.get("user") == bot_user_id for m in messages)
 
 
-def context_id(channel: str, thread_ts: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"slack:{channel}:{thread_ts}"))
+def context_id(agent: str, channel: str, thread_ts: str) -> str:
+    key = f"slack:{agent}:{channel}:{thread_ts}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
+
+def pick_agent(text: str, agents: tuple[str, ...]) -> tuple[str, str]:
+    """The agent a leading `<name>:` names, and the text without it."""
+    m = _PREFIX.match(text)
+    if m:
+        name = m.group(1).lower()
+        for agent in agents:
+            if agent.removesuffix("-agent") == name:
+                return agent, m.group(2)
+    return agents[0], text
+
+
+def thread_agent(messages: list[dict[str, str]], agents: tuple[str, ...]) -> str:
+    """The agent a thread's first message picked."""
+    root = strip_mention(messages[0].get("text", "")) if messages else ""
+    return pick_agent(root, agents)[0]
 
 
 def strip_mention(text: str) -> str:
@@ -268,8 +290,10 @@ def ask(a2a_url: str, request: dict[str, object]) -> Reply:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    # Both URLs carry an {agent} placeholder.
     a2a_url = os.environ["KAGENT_A2A_URL"]
     ui_chat_url = os.environ["KAGENT_UI_CHAT_URL"].rstrip("/")
+    agents = tuple(os.environ["KAGENT_AGENTS"].replace(",", " ").split())
     allowed = frozenset(os.environ["ALLOWED_USER_IDS"].replace(",", " ").split())
     app = App(token=os.environ["SLACK_BOT_TOKEN"])
 
@@ -280,15 +304,20 @@ def main() -> None:
             logger.warning("ignoring user %s", event.get("user"))
             return
         text = strip_mention(event.get("text", ""))
-        if not text:
-            return
-        ctx = context_id(channel, thread_ts)
         pending = None
-        if thread_ts != ts:
+        if thread_ts == ts:
+            agent, text = pick_agent(text, agents)
+        else:
             replies = client.conversations_replies(
                 channel=channel, ts=thread_ts, include_all_metadata=True
             )
-            pending = pending_prompt(replies.get("messages", []), bot_user_id)
+            messages = replies.get("messages", [])
+            agent = thread_agent(messages, agents)
+            pending = pending_prompt(messages, bot_user_id)
+        if not text:
+            return
+        ctx = context_id(agent, channel, thread_ts)
+        logger.info("context %s -> %s", ctx, agent)
         client.reactions_add(channel=channel, timestamp=ts, name="eyes")
         metadata = None
         try:
@@ -296,8 +325,8 @@ def main() -> None:
                 request = build_answer(text, ctx, pending)
             else:
                 request = build_request(text, ctx)
-            reply = ask(a2a_url, request)
-            chunks = render(reply, ui_chat_url, ctx)
+            reply = ask(a2a_url.format(agent=agent), request)
+            chunks = render(reply, ui_chat_url.format(agent=agent), ctx)
             if reply.pending:
                 metadata = pending_metadata(reply.pending)
         except AnswerError as err:
