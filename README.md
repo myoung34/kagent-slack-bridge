@@ -19,7 +19,8 @@ thread reach it without a mention.
 - **Allowlist.** Only users in `ALLOWED_USER_IDS` get an answer.
 - **Questions from the agent** are relayed. When the agent (or a subagent it
   calls) pauses on kagent's `ask_user`, the bot posts the questions and your
-  next thread reply answers them, one line per question. A tool awaiting
+  next thread reply answers them, one line per question, or one line
+  for all of them (e.g. "proceed"). A tool awaiting
   approval takes `approve`, or `reject` with an optional reason. The bot keeps
   no state: the paused task id rides on its Slack post as message metadata.
   Any other `input-required` pause links to the kagent UI session instead.
