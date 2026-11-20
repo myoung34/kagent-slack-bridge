@@ -1,3 +1,9 @@
+import io
+import threading
+import urllib.error
+import urllib.request
+from collections.abc import Iterator
+
 import pytest
 
 import bot
@@ -58,6 +64,9 @@ def test_thread_agent_follows_the_root_message(
         ("hey <@U123>  what's up ", "hey what's up"),
         ("no mention", "no mention"),
         ("<@U123> 1 nfs\n2  yes\n3 photos", "1 nfs\n2 yes\n3 photos"),
+        # Slack wraps links; the agent needs the bare URL to fetch it.
+        ("read <https://x.example/a.png>", "read https://x.example/a.png"),
+        ("see <https://x.example/a|x.example/a> now", "see https://x.example/a now"),
     ],
 )
 def test_strip_mention(text: str, expected: str) -> None:
@@ -186,6 +195,20 @@ BOT = "UBOT"
                 "text": f"<@{BOT}> hi",
             },
             bot.Route.IGNORE,
+        ),
+        # Messages with an uploaded file.
+        (
+            {"channel_type": "im", "ts": "1", "subtype": "file_share"},
+            bot.Route.HANDLE,
+        ),
+        (
+            {
+                "channel_type": "channel",
+                "ts": "2",
+                "thread_ts": "1",
+                "subtype": "file_share",
+            },
+            bot.Route.IF_BOT_IN_THREAD,
         ),
         # Edits, joins and bot posts (including our own).
         (
@@ -390,3 +413,73 @@ def test_answer_approval(text: str, expected: dict[str, str]) -> None:
 def test_answer_approval_needs_a_clear_decision() -> None:
     with pytest.raises(bot.AnswerError, match="approve"):
         bot.build_answer("maybe later", "c", bot.Pending("t", 0))
+
+
+KEY = b"k" * 32
+BASE = "http://bridge:8080"
+PNG = {"id": "F1", "name": "shot.png", "mimetype": "image/png"}
+PDF = {"id": "F2", "name": "doc.pdf", "mimetype": "application/pdf"}
+
+
+def test_with_images_links_only_images() -> None:
+    text = bot.with_images("what is this?", [PNG, PDF], BASE, KEY)
+    assert text.startswith("what is this?\n\n")
+    assert f"{BASE}/files/F1/" in text
+    assert "F2" not in text
+    assert "tesseract" in text
+
+
+def test_with_images_without_images_keeps_the_text() -> None:
+    assert bot.with_images("hi", [PDF], BASE, KEY) == "hi"
+    assert bot.with_images("hi", [], BASE, KEY) == "hi"
+
+
+def test_with_images_works_with_no_text() -> None:
+    assert bot.with_images("", [PNG], BASE, KEY).startswith("Attached image")
+
+
+@pytest.fixture
+def proxy() -> Iterator[str]:
+    def fetch(file_id: str) -> tuple[str, io.BytesIO]:
+        if file_id != "F1":
+            raise LookupError(file_id)
+        return "image/png", io.BytesIO(b"png-bytes")
+
+    server = bot.file_proxy(0, KEY, fetch)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+
+
+def _get(url: str) -> tuple[int, str, bytes]:
+    try:
+        with urllib.request.urlopen(url) as r:
+            return r.status, r.headers["Content-Type"], r.read()
+    except urllib.error.HTTPError as err:
+        return err.code, "", b""
+
+
+def _linked_url(base: str, file: dict[str, str]) -> str:
+    text = bot.with_images("", [file], base, KEY)
+    return next(w for w in text.split() if w.startswith(base))
+
+
+def test_proxy_serves_a_linked_image(proxy: str) -> None:
+    assert _get(_linked_url(proxy, PNG)) == (200, "image/png", b"png-bytes")
+
+
+@pytest.mark.parametrize(
+    "path", ["/files/F1/bad", "/files/F1", "/files/F3/x", "/", "/files/F1/x/y"]
+)
+def test_proxy_refuses_unsigned_paths(proxy: str, path: str) -> None:
+    assert _get(proxy + path)[0] == 404
+
+
+def test_proxy_signature_is_per_file(proxy: str) -> None:
+    sig = _linked_url(proxy, PNG).rsplit("/", 1)[1]
+    assert _get(f"{proxy}/files/F2/{sig}")[0] == 404
+
+
+def test_proxy_reports_a_missing_file(proxy: str) -> None:
+    gone = {"id": "F9", "name": "g.png", "mimetype": "image/png"}
+    assert _get(_linked_url(proxy, gone))[0] == 502

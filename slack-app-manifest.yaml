@@ -22,6 +22,8 @@ oauth_config:
       - channels:history
       - groups:history
       - chat:write
+      # Download uploaded images for the file proxy (FILE_PROXY_URL).
+      - files:read
       - im:history
       - reactions:write
 settings:
