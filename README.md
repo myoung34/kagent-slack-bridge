@@ -24,6 +24,11 @@ thread reach it without a mention.
   approval takes `approve`, or `reject` with an optional reason. The bot keeps
   no state: the paused task id rides on its Slack post as message metadata.
   Any other `input-required` pause links to the kagent UI session instead.
+- **Images.** Image links reach the agent as plain URLs. Uploaded images
+  reach it as links to the bridge's file proxy (`FILE_PROXY_URL`), which
+  streams the file from Slack, since the agent has no Slack token. Each link
+  is signed (an HMAC of the file id keyed from the bot token), so the proxy
+  serves only images the bridge linked. Other uploads are ignored.
 
 ## Configuration
 
@@ -35,6 +40,8 @@ thread reach it without a mention.
 | `ALLOWED_USER_IDS` | Comma- or space-separated Slack member IDs |
 | `SLACK_BOT_TOKEN` | Bot User OAuth Token (`xoxb-`) |
 | `SLACK_APP_TOKEN` | App-level token with `connections:write` (`xapp-`) |
+| `FILE_PROXY_URL` | Base URL the agents reach the file proxy at, e.g. `http://kagent-slack.kagent:8080` |
+| `FILE_PROXY_PORT` | File proxy listen port; default `8080` |
 
 Create the Slack app from [`slack-app-manifest.yaml`](slack-app-manifest.yaml).
 It uses Socket Mode, so the bot needs no ingress.

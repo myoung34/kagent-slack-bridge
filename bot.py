@@ -10,16 +10,28 @@ the question and the next thread reply answers it.
 Each Slack thread maps to one kagent conversation through a context id
 derived from the thread, so threads keep their context across restarts
 without any stored state.
+
+Images uploaded with a message reach the agent as links to this bridge's
+file proxy, which streams the file from Slack (the agent has no Slack
+token). Each link carries an HMAC of the file id, so the proxy serves only
+files the bridge linked.
 """
 
+import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import shutil
+import threading
 import urllib.request
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import BinaryIO
 
 from slack_bolt import App, BoltContext
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -30,6 +42,10 @@ logger = logging.getLogger(__name__)
 # chat.postMessage caps markdown_text at 12,000 characters.
 SLACK_MAX = 12_000
 _MENTION = re.compile(r"<@[A-Z0-9]+>")
+# Slack sends links as <url> or <url|label>.
+_LINK = re.compile(r"<(https?://[^|>]+)(?:\|[^>]*)?>")
+# Message subtypes that are still a person talking to the bot.
+_USER_SUBTYPES = {"file_share"}
 _FAILED = {"failed", "rejected", "canceled"}
 _CONFIRMATION = "adk_request_confirmation"
 _ASK_USER = "ask_user"
@@ -72,7 +88,8 @@ class Route(Enum):
 
 def route_message(event: dict[str, str], bot_user_id: str) -> Route:
     """Decide what to do with a `message` event (mentions arrive separately)."""
-    if "subtype" in event or "bot_id" in event:
+    subtype = event.get("subtype")
+    if (subtype and subtype not in _USER_SUBTYPES) or "bot_id" in event:
         return Route.IGNORE
     if event.get("channel_type") == "im":
         return Route.HANDLE
@@ -111,8 +128,74 @@ def thread_agent(messages: list[dict[str, str]], agents: tuple[str, ...]) -> str
 
 
 def strip_mention(text: str) -> str:
-    lines = (" ".join(line.split()) for line in _MENTION.sub(" ", text).splitlines())
+    text = _LINK.sub(r"\1", _MENTION.sub(" ", text))
+    lines = (" ".join(line.split()) for line in text.splitlines())
     return "\n".join(line for line in lines if line)
+
+
+def _sign(key: bytes, file_id: str) -> str:
+    return hmac.new(key, file_id.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def with_images(
+    text: str, files: list[dict[str, str]], proxy_url: str, key: bytes
+) -> str:
+    """The text plus a proxy link for each uploaded image."""
+    links = [
+        f"Attached image {f.get('name', '')}: "
+        f"{proxy_url}/files/{f['id']}/{_sign(key, f['id'])}"
+        for f in files
+        if f.get("mimetype", "").startswith("image/")
+    ]
+    if not links:
+        return text
+    links.append("Download with curl; read its text with `tesseract <file> -`.")
+    return "\n\n".join(p for p in (text, "\n".join(links)) if p)
+
+
+Fetch = Callable[[str], tuple[str, BinaryIO]]
+
+
+def file_proxy(port: int, key: bytes, fetch: Fetch) -> ThreadingHTTPServer:
+    """Serve GET /files/<id>/<sig> by streaming fetch(id) (mimetype, body)."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            parts = self.path.split("/")
+            if (
+                len(parts) != 4
+                or parts[1] != "files"
+                or not hmac.compare_digest(parts[3], _sign(key, parts[2]))
+            ):
+                self.send_error(404)
+                return
+            try:
+                mimetype, body = fetch(parts[2])
+            except Exception:
+                logger.exception("fetching file %s", parts[2])
+                self.send_error(502)
+                return
+            with body:
+                self.send_response(200)
+                self.send_header("Content-Type", mimetype)
+                self.end_headers()
+                shutil.copyfileobj(body, self.wfile)
+
+        def log_message(self, format: str, *args: object) -> None:
+            logger.info("file proxy: " + format, *args)
+
+    return ThreadingHTTPServer(("", port), Handler)
+
+
+def slack_fetch(client: WebClient, token: str) -> Fetch:
+    def fetch(file_id: str) -> tuple[str, BinaryIO]:
+        f = client.files_info(file=file_id)["file"]
+        req = urllib.request.Request(
+            f["url_private_download"], headers={"Authorization": f"Bearer {token}"}
+        )
+        return f["mimetype"], urllib.request.urlopen(req, timeout=60)
+
+    return fetch
 
 
 def is_allowed(user: str, allowed: frozenset[str]) -> bool:
@@ -298,7 +381,17 @@ def main() -> None:
     ui_chat_url = os.environ["KAGENT_UI_CHAT_URL"].rstrip("/")
     agents = tuple(os.environ["KAGENT_AGENTS"].replace(",", " ").split())
     allowed = frozenset(os.environ["ALLOWED_USER_IDS"].replace(",", " ").split())
-    app = App(token=os.environ["SLACK_BOT_TOKEN"])
+    proxy_url = os.environ["FILE_PROXY_URL"].rstrip("/")
+    token = os.environ["SLACK_BOT_TOKEN"]
+    # Stable across restarts, so links in old turns keep working.
+    key = hashlib.sha256(b"kagent-slack-file-proxy:" + token.encode()).digest()
+    app = App(token=token)
+    proxy = file_proxy(
+        int(os.environ.get("FILE_PROXY_PORT", "8080")),
+        key,
+        slack_fetch(app.client, token),
+    )
+    threading.Thread(target=proxy.serve_forever, daemon=True).start()
 
     def handle(event: dict[str, str], client: WebClient, bot_user_id: str) -> None:
         channel, ts = event["channel"], event["ts"]
@@ -317,6 +410,7 @@ def main() -> None:
             messages = replies.get("messages", [])
             agent = thread_agent(messages, agents)
             pending = pending_prompt(messages, bot_user_id)
+        text = with_images(text, event.get("files", []), proxy_url, key)
         if not text:
             return
         ctx = context_id(agent, channel, thread_ts)
